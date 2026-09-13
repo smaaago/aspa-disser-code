@@ -1,0 +1,12 @@
+# Обновление данных (src/update_data.py)
+pandas
+numpy
+requests
+yfinance
+
+# Полный пайплайн Главы 3 (src/01...08*)
+matplotlib
+scipy
+statsmodels
+arch
+# + R: rugarch, factorstochvol, stochvol, FinTS (для 06*.R)
