@@ -16,6 +16,13 @@
 уровне 97,5% с симуляционными p-значениями, FZ0-потеря и Диболд-Мариано
 против cDCC), но на вневыборочном периоде 2015-01 — 2026-06.
 
+Капитал считается по базельскому правилу IMA с надбавкой светофора
+(плюс-фактором) по пробоям за скользящие 250 дней; прежняя форма
+mult*max(VaR, avg60) сохранена контрольными колонками. Дополнительно
+приводится строка FMSV с рекалибровкой покрытия (множитель c* подобран на
+том же периоде до уровня пробоев лучшей DCC-модели — верхняя граница, не
+прогноз).
+
 Выходы: output/tables/table30_oos_backtest.csv,
         table30b_oos_periods.csv, table30c_oos_capital.csv,
         output/figures/fig6_var_capital_full.png (заменяет ин-сэмпл версию).
@@ -280,7 +287,29 @@ print("\n=== OOS period-wise violations ===")
 print(period_bt.round(3).to_string(index=False))
 
 # ---------------------------------------------------------------- капитал
-def capital_path(var_arr, mult=3.0, lookback=60):
+# Базельское правило IMA с надбавкой светофора («плюс-фактором»):
+#   K_t = max(VaR_{t-1}, (m_c + plus_t) * avg60),
+# где plus_t определяется числом пробоев VaR(99%) за скользящие 250 торговых
+# дней до t-1 включительно: 0–4: +0,00; 5: +0,40; 6: +0,50; 7: +0,65;
+# 8: +0,75; 9: +0,85; >=10: +1,00 (BCBS, Supervisory framework 1996).
+# Прежняя (небазельская) форма mult*max(VaR, avg60) сохранена контрольными
+# колонками *_legacy.
+PLUS_FACTOR = {5: 0.40, 6: 0.50, 7: 0.65, 8: 0.75, 9: 0.85}
+
+def capital_path_basel(var_arr, viol_arr, m_base=3.0, lookback=60, window=250):
+    n = len(var_arr)
+    K = np.zeros(n)
+    cs = np.concatenate([[0], np.cumsum(viol_arr.astype(int))])
+    for t in range(lookback, n):
+        n_viol = int(cs[t] - cs[max(0, t - window)])
+        plus = 0.0 if n_viol <= 4 else PLUS_FACTOR.get(n_viol, 1.00)
+        K[t] = max(var_arr[t - 1],
+                   (m_base + plus) * var_arr[max(0, t - lookback):t].mean())
+    K[:lookback] = K[lookback]
+    return K
+
+def capital_path_legacy(var_arr, mult=3.0, lookback=60):
+    """Контрольная (прежняя) форма: mult * max(VaR_{t-1}, avg60)."""
     n = len(var_arr)
     K = np.zeros(n)
     for t in range(lookback, n):
@@ -288,21 +317,47 @@ def capital_path(var_arr, mult=3.0, lookback=60):
     K[:lookback] = K[lookback]
     return K
 
+# Рекалибровка покрытия FMSV: множитель c* подбирается минимальным, при
+# котором число пробоев VaR(99%) не превышает лучшую модель DCC-семейства
+# (GDCC). Подбор ведётся на том же оценочном периоде, поэтому строка -
+# верхняя граница возможностей модели, а не прогнозный результат
+# (оговорка в § 3.7.4).
+viol_target = int((pr < -models["M4_GDCC_t"]["VaR"]).sum())
+lo_c, hi_c = 1.0, 1.5
+for _ in range(60):
+    mid = 0.5 * (lo_c + hi_c)
+    if int((pr < -mid * models["M5_FMSV"]["VaR"]).sum()) > viol_target:
+        lo_c = mid
+    else:
+        hi_c = mid
+c_star = hi_c
+n_recal = int((pr < -c_star * models["M5_FMSV"]["VaR"]).sum())
+print(f"\nРекалибровка FMSV: c* = {c_star:.4f} -> {n_recal} пробоев (цель {viol_target})")
+
 cap_rows = []
 cap_paths = {}
-for name, md in models.items():
-    Kp = capital_path(md["VaR"]) * NOTIONAL
+entries = [(name, md["VaR"]) for name, md in models.items()]
+entries.append(("M5_FMSV_recal", c_star * models["M5_FMSV"]["VaR"]))
+for name, var_arr in entries:
+    viol_arr = pr < -var_arr
+    Kp = capital_path_basel(var_arr, viol_arr) * NOTIONAL
+    Kl = capital_path_legacy(var_arr) * NOTIONAL
     cap_paths[name] = Kp
     cap_rows.append({"model": name,
+                     "n_viol": int(viol_arr.sum()),
                      "avg_K_mln_RUB": Kp.mean() / 1e6,
                      "max_K_mln_RUB": Kp.max() / 1e6,
-                     "delta_vs_M0_mln_RUB": (Kp - cap_paths["M0_EWMA"]).mean() / 1e6
-                         if "M0_EWMA" in cap_paths else 0.0,
-                     "annual_carry_cost_mln_RUB": Kp.mean() * WACC / 1e6})
+                     "annual_carry_cost_mln_RUB": Kp.mean() * WACC / 1e6,
+                     "avg_K_legacy_mln_RUB": Kl.mean() / 1e6,
+                     "max_K_legacy_mln_RUB": Kl.max() / 1e6,
+                     "c_star": c_star if name == "M5_FMSV_recal" else np.nan})
 cap = pd.DataFrame(cap_rows)
 cap.to_csv(TAB / "table30c_oos_capital.csv", index=False)
-print("\n=== OOS capital summary ===")
+print("\n=== OOS capital summary (Basel + plus-factor; *_legacy - контроль) ===")
 print(cap.round(2).to_string(index=False))
+
+# дневные пути капитала — вход панели (г) сводного рисунка (08b)
+pd.DataFrame(cap_paths, index=oos_idx).to_csv(TAB / "table30d_oos_capital_paths.csv")
 
 # ---------------------------------------------------------------- рисунок
 fig, axes = plt.subplots(2, 1, figsize=(13, 8), sharex=True)
@@ -316,7 +371,8 @@ axes[0].legend(loc="upper right", ncol=3, frameon=False)
 for name in models:
     axes[1].plot(oos_idx, cap_paths[name] / 1e9, color=colors.get(name, "k"), lw=0.7, label=name)
 axes[1].set_ylabel("Капитал, млрд руб.")
-axes[1].set_title("Требуемый капитал по вневыборочным прогнозам (нотионал 10 млрд руб., $m_c = 3{,}0$)")
+axes[1].set_title("Требуемый капитал по вневыборочным прогнозам "
+                  "(нотионал 10 млрд руб., базельское правило с плюс-фактором)")
 axes[1].legend(loc="upper right", ncol=3, frameon=False)
 for ax in axes:
     for vs, ve, c in [("2020-02-20", "2020-06-30", "purple"),

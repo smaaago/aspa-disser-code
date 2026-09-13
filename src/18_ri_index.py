@@ -13,9 +13,14 @@ RTSI в систему не входит, поскольку является а
     I_i — вклад остальных секторов,
     own_i — собственный вклад;
 индекс внутренней ориентации RI = sum(I) / (sum(I) + sum(E)) лежит в [0, 1]
-по построению, имеет общий знаменатель для внешней и внутренней частей и не
-зависит от соотношения размерностей исходных систем. RI > 0,5 означает, что
-в чужой дисперсии секторов внутренние источники весят больше внешних.
+и имеет общий знаменатель для внешней и внутренней частей — это устраняет
+несоизмеримость двух раздельно нормированных TCI. Уровень сырого RI при этом
+зависит от состава и числа узлов: при равной силе всех связей 6 внутренних и
+3 внешних источника механически дают RI = 2/3, поэтому рядом считается
+нормированный на число источников RI_avg = (I/6) / (I/6 + E/G) с нейтральной
+точкой 0,5, а чувствительность к представлению внешнего блока проверяется
+гранулярностью G = 1 / 3 / 14 узлов (одна равновзвешенная мировая
+лог-волатильность / три региона — базовый вариант / все 14 внешних рынков).
 
 Оценки: полная выборка и подпериоды (VAR(2), GFEVD H = 10), скользящее окно
 250/10 с VAR(1) — конфигурация протокола § 2.3.3; фильтрационная проверка —
@@ -26,6 +31,7 @@ kappa1 = 0,99, kappa2 = 0,96 и 0,99). Режимный сдвиг RI датир
 
 Выходы: output/tables/table31_ri_full.csv, table31b_ri_periods.csv,
         table31c_ri_daily.csv, table31d_ri_breaks.csv,
+        table31e_ri_granularity.csv (Прил. Б.8),
         output/figures/fig24_ri_index.png.
 Запуск из корня: .venv/bin/python src/18_ri_index.py  (~3-5 мин)
 """
@@ -78,6 +84,15 @@ def ri_of(theta):
     return float(I.sum() / (I.sum() + E.sum()))
 
 
+N_INT = len(SECTORS) - 1  # внутренних источников у каждого сектора
+
+
+def ri_avg_of(E_sum, I_sum, g_ext):
+    """RI, нормированный на число источников: средний внутренний источник
+    против среднего внешнего; нейтральная точка 0,5 при любых размерностях."""
+    return float((I_sum / N_INT) / (I_sum / N_INT + E_sum / g_ext))
+
+
 # ------------------------------------------------------- полная выборка
 B_list, Sigma = fit_var(y, p=2)
 theta_full = fevd_generalised(B_list, Sigma, H=H)
@@ -87,7 +102,8 @@ full_rows = [{"sector": NICE[s], "own": own_f[i], "I_internal": I_f[i],
              for i, s in enumerate(SECTORS)]
 full_rows.append({"sector": "Все сектора", "own": own_f.mean(),
                   "I_internal": I_f.sum(), "E_external": E_f.sum(),
-                  "RI": ri_of(theta_full)})
+                  "RI": ri_of(theta_full),
+                  "RI_avg": ri_avg_of(E_f.sum(), I_f.sum(), 3)})
 ri_full = pd.DataFrame(full_rows)
 ri_full.to_csv(TAB / "table31_ri_full.csv", index=False)
 print("\n=== Полная выборка: внешне-внутренняя декомпозиция ===")
@@ -103,14 +119,46 @@ for name, (a, b) in PERIODS_LOCAL.items():
     th = fevd_generalised(B, S, H=H)
     E, I, _ = decompose(th)
     row = {"period": name, "n_obs": len(sub), "E_sum": E.sum(), "I_sum": I.sum(),
-           "RI": I.sum() / (I.sum() + E.sum())}
+           "RI": I.sum() / (I.sum() + E.sum()),
+           "RI_avg": ri_avg_of(E.sum(), I.sum(), 3)}
     for i, s in enumerate(SECTORS):
         row[f"RI_{s}"] = I[i] / (I[i] + E[i])
     per_rows.append(row)
 ri_per = pd.DataFrame(per_rows)
 ri_per.to_csv(TAB / "table31b_ri_periods.csv", index=False)
 print("\n=== Подпериоды: агрегатный RI ===")
-print(ri_per[["period", "n_obs", "E_sum", "I_sum", "RI"]].round(3).to_string(index=False))
+print(ri_per[["period", "n_obs", "E_sum", "I_sum", "RI", "RI_avg"]]
+      .round(3).to_string(index=False))
+
+# ---------------------------------------- гранулярность внешнего блока (Б.8)
+# Уровень сырого RI зависит от представления внешнего блока; проверяются три
+# варианта: G = 1 (одна равновзвешенная мировая лог-волатильность), G = 3
+# (базовые регионы), G = 14 (все внешние рынки по отдельности).
+WORLD_MKTS = [m for ms in REGIONS.values() for m in ms]
+gran_variants = {
+    1: y_loc.join(pd.DataFrame({"WORLD": y_glob[WORLD_MKTS].mean(axis=1)}),
+                  how="inner").dropna(),
+    3: y,
+    14: y_loc.join(y_glob[WORLD_MKTS], how="inner").dropna(),
+}
+gran_rows = []
+for g, yy in gran_variants.items():
+    windows = [("FULL", yy)] + [(name, yy.loc[a:b])
+                                for name, (a, b) in PERIODS_LOCAL.items()]
+    for name, sub in windows:
+        if len(sub) < 60:
+            continue
+        B, S = fit_var(sub, p=2 if len(sub) > 150 else 1)
+        th = fevd_generalised(B, S, H=H)
+        E, I, _ = decompose(th)
+        gran_rows.append({"G": g, "period": name, "n_obs": len(sub),
+                          "E_sum": E.sum(), "I_sum": I.sum(),
+                          "RI": I.sum() / (I.sum() + E.sum()),
+                          "RI_avg": ri_avg_of(E.sum(), I.sum(), g)})
+gran = pd.DataFrame(gran_rows)
+gran.to_csv(TAB / "table31e_ri_granularity.csv", index=False)
+print("\n=== Гранулярность внешнего блока (G = 1/3/14) ===")
+print(gran.round(3).to_string(index=False))
 
 # ------------------------------------------------------- скользящее окно
 def rolling_ri(y, win=250, step=10, p=1):

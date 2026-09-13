@@ -331,20 +331,29 @@ print("\n=== Period-wise violations ===")
 print(period_bt.round(3).to_string(index=False))
 
 # ===== Capital =====
+# Базельское правило IMA с надбавкой светофора — та же формула, что во
+# вневыборочном блоке (21): K_t = max(VaR_{t-1}, (m_c + plus_t) * avg60);
+# plus_t — по пробоям за скользящие 250 дней до t-1 включительно.
 NOTIONAL = 10e9; WACC = 0.13
-def capital_path(var_arr, mult=3.0, lookback=60):
+PLUS_FACTOR = {5: 0.40, 6: 0.50, 7: 0.65, 8: 0.75, 9: 0.85}
+
+def capital_path(var_arr, viol_arr, m_base=3.0, lookback=60, window=250):
     n = len(var_arr)
     K = np.zeros(n)
+    cs = np.concatenate([[0], np.cumsum(viol_arr.astype(int))])
     for t in range(lookback, n):
-        rolling = var_arr[max(0, t - lookback):t].mean()
-        K[t] = mult * max(var_arr[t - 1], rolling)
+        n_viol = int(cs[t] - cs[max(0, t - window)])
+        plus = 0.0 if n_viol <= 4 else PLUS_FACTOR.get(n_viol, 1.00)
+        K[t] = max(var_arr[t - 1],
+                   (m_base + plus) * var_arr[max(0, t - lookback):t].mean())
     K[:lookback] = K[lookback]
     return K
 
 cap_rows = []
 cap_paths = {}
 for name, _ in models.items():
-    Kpath = capital_path(VaR[name]) * NOTIONAL
+    viol_full = port_ret < -VaR[name]
+    Kpath = capital_path(VaR[name], viol_full) * NOTIONAL
     cap_paths[name] = Kpath
     cap_rows.append({"model": name,
                      "avg_K_mln_RUB": Kpath.mean() / 1e6,
@@ -381,7 +390,7 @@ for name in models:
     axes[1].plot(res.index, cap_paths[name] / 1e9, color=colors.get(name, "k"),
                  lw=0.7, label=name)
 axes[1].set_ylabel("Капитал, млрд руб.")
-axes[1].set_title("Требуемый капитал (нотионал 10 млрд руб., m_c = 3,0)")
+axes[1].set_title("Требуемый капитал (нотионал 10 млрд руб., базельское правило с плюс-фактором)")
 axes[1].legend(loc="upper right", ncol=3, frameon=False)
 for vs, ve, c in [("2008-09-15", "2009-06-30", "red"),
                   ("2020-02-20", "2020-06-30", "purple"),

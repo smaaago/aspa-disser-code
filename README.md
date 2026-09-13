@@ -10,7 +10,7 @@
 | Компонент | Версия | Пакеты |
 |---|---|---|
 | Python | 3.10 | `pandas`, `numpy`, `scipy`, `statsmodels`, `scikit-learn`, `arch`, `matplotlib`, `yfinance`, `requests` (`requirements.txt`) |
-| R | 4.5 | `factorstochvol`, `stochvol`, `rugarch`, `rmgarch`, `FinTS` |
+| R | 4.5 | `factorstochvol`, `stochvol`, `rugarch`, `rmgarch`, `FinTS`, `frequencyConnectedness`, `vars` (сверка BK) |
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -37,6 +37,7 @@ mkdir -p output && cp data/log_rets.csv output/log_rets_clean.csv
 .venv/bin/python src/04_dcc_adcc.py
 .venv/bin/python src/04b_gdcc_clustered.py
 .venv/bin/python src/05_connectedness.py
+Rscript              src/22_bk_crosscheck.R   # сверка полос BK с frequencyConnectedness, ~2 мин
 Rscript              src/06_fmsv.R            # MCMC, ~6–8 мин
 Rscript              src/06d_fmsv_cov.R       # ковариационный тензор FMSV
 .venv/bin/python src/06c_fmsv_plots.py
@@ -82,13 +83,14 @@ Rscript              src/17_fmsv_subsamples.R # FMSV до/после 2022 + K-ч
 | `03_univariate_garch.py` | этап 1: GARCH/GJR/EGARCH-skew-$t$ | 6, 7 | — |
 | `04_dcc_adcc.py` | этап 2: DCC / ADCC / cDCC | 8, Б.1 | 7, 8 |
 | `04b_gdcc_clustered.py` | этап 2: кластерно-регуляризованная GDCC | 8, Б.2, Б.3 | 6 |
-| `05_connectedness.py` | этап 3: связность DY + полосы BK | 9, 10 | 11 |
+| `05_connectedness.py` | этап 3: связность DY + полосы BK, сходимость по горизонту, граница полосы | 9, 10 | 11 |
+| `22_bk_crosscheck.R` | этап 3: сверка полос BK с эталонной реализацией `frequencyConnectedness` | — | — |
 | `06_fmsv.R`, `06d_fmsv_cov.R` | этап 4: байесовская FMSV, ковариационный тензор | 11 | — |
 | `06c_fmsv_plots.py`, `08c_fmsv_paths.py` | визуализация FMSV | — | 12, 13 |
 | `09_moex_univariate.py` | этап 5: одномерный этап локального уровня | — | — |
 | `09b_moex_dcc_gdcc.py` | этап 5: корреляционные модели секторов | 12, Б.2, Б.3 | 14 |
 | `09c_moex_connectedness.py` | этап 5: связность секторов и мост двух уровней | 13, 14, Б.4 | 15, 16 |
-| `18_ri_index.py` | этап 5: единая система двух уровней, индекс RI (§ 3.6.5) | 15 | 17 |
+| `18_ri_index.py` | этап 5: единая система двух уровней, индексы RI и RI_avg, гранулярность внешнего блока (§ 3.6.5) | 15, Б.8 | 17 |
 | `07b_var_es_full.py` | этап 6: полновыборочная диагностика моделей риска | Б.6 | 19 |
 | `19_oos_forecasts.py`, `20_fmsv_oos.R` | этап 6: вневыборочные прогнозы (расширяющееся окно) | — | — |
 | `21_oos_backtest.py` | этап 6: вневыборочный бэктест VaR/ES и капитал | 16, 17, 18 | 18 |

@@ -7,7 +7,8 @@ H = 10) и её частотное разложение по Барунику–
 TVP-VAR-альтернатива без окон реализована в 16_tvp_var_connectedness.py.
 
 Выходы: table6_dy_full, table7_dy_periods, table8_dy_rolling, table9_bk_*,
-fig5_rolling_tci.
+table9b_tci_horizon (сходимость TCI по горизонту к спектральному пределу),
+table9c_bk_boundary (чувствительность к границе полосы), fig5_rolling_tci.
 """
 import warnings
 
@@ -82,4 +83,30 @@ for b, M in bk.items():
     dfbk = pd.DataFrame(M * 100, index=cols, columns=cols)
     dfbk["FROM"] = dfbk.sum(axis=1) - np.diag(M * 100)
     dfbk.to_csv(TAB / f"table9_bk_{BAND_LABELS[b].replace(' ', '_').replace('>', 'gt')}.csv")
+
+# ===== контроль конструкции BK (§ 3.4.4) =====
+# (а) сходимость: сумма частотных полос равна связности спектральной
+# (H -> inf) таблицы GFEVD, а конечно-горизонтный TCI монотонно приближается
+# к ней с ростом горизонта прогноза
+hor_rows = [{"H": h, "TCI": tci_of(fevd_generalised(B_list, Sigma, H=h))}
+            for h in (10, 50, 200, 1600)]
+hor_rows.append({"H": "sum_of_bands",
+                 "TCI": sum(tci_of(M) for M in bk.values())})
+pd.DataFrame(hor_rows).to_csv(TAB / "table9b_tci_horizon.csv", index=False)
+print("\n=== TCI(H) convergence ===")
+for r in hor_rows:
+    print(f"  H={r['H']}: {r['TCI']:.2f}")
+
+# (б) чувствительность к границе полосы: отсечка 20 / 10 (протокол § 2.3.3) /
+# 5 торговых дней
+bound_rows = []
+for lab, wc in [("20d", np.pi / 10), ("10d", np.pi / 5), ("5d", 2 * np.pi / 5)]:
+    bk_b = fevd_bk(B_list, Sigma, bands=[(0.0, wc), (wc, np.pi)])
+    bound_rows.append({"boundary": lab,
+                       "Long": tci_of(bk_b[(0.0, wc)]),
+                       "Short": tci_of(bk_b[(wc, np.pi)])})
+pd.DataFrame(bound_rows).to_csv(TAB / "table9c_bk_boundary.csv", index=False)
+print("=== BK boundary sensitivity ===")
+for r in bound_rows:
+    print(f"  cutoff {r['boundary']}: Long={r['Long']:.2f}, Short={r['Short']:.2f}")
 print("Done. BK saved.")
