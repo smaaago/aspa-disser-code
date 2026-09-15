@@ -17,9 +17,14 @@
 ## каждый прогноз опирается только на прошлое. Число MCMC-итераций сокращено
 ## до 1500+500 (полный прогон одной переоценки ~10-15 с; их ~290).
 ##
+## Критерий приёмки цепи и перезапуски формализованы константами ниже;
+## журнал всех попыток (включая принятые) пишется в
+## output/oos_fmsv_retry_log_chunk<i>.csv — окно, дата, номер попытки, зерно,
+## прогрев, исход, значение критерия.
+##
 ## Запуск из корня, четырьмя параллельными потоками:
 ##   for i in 0 1 2 3; do Rscript src/20_fmsv_oos.R $i 4 & done; wait
-## Выход: output/oos_fmsv_sdraws_chunk<i>.bin (+ .dates, .meta)
+## Выход: output/oos_fmsv_sdraws_chunk<i>.bin (+ .dates, .meta, retry-журнал)
 
 suppressMessages(library(factorstochvol))
 
@@ -42,6 +47,17 @@ switch_date <- as.Date("2022-02-21")
 
 K <- 3; DRAWS <- 1500; BURN <- 500; STEP <- 10
 
+## Критерий приёмки цепи: доля розыгрышей с дневным портфельным СКО выше
+## SD_BLOWUP не превышает BLOWUP_SHARE_MAX. Порог — детектор численного
+## взрыва цепи (нормальные значения СКО на этих данных на два порядка ниже
+## 50%), цензурировать правдоподобные тяжёлые хвосты он не может. При
+## нарушении — перезапуск с новым зерном и удлинённым прогревом, не более
+## MAX_ATTEMPTS попыток; зерно детерминировано парой (окно, попытка).
+SD_BLOWUP <- 0.5            # дневное портфельное СКО 50%
+BLOWUP_SHARE_MAX <- 0.001   # допустимая доля таких розыгрышей
+MAX_ATTEMPTS <- 8
+BURN_STEP <- 500            # удлинение прогрева на каждую попытку
+
 t0 <- max(which(df$Datetime <= as.Date("2014-12-31")))
 refits <- seq(t0, Tn - 1, by = STEP)
 mine <- refits[(seq_along(refits) - 1) %% nchunks == chunk]
@@ -51,6 +67,7 @@ cat(sprintf("chunk %d/%d: %d refits (of %d total), first %s\n",
 
 all_dates <- character(0)
 all_sd <- NULL   # строки — прогнозные дни, столбцы — розыгрыши
+retry_log <- list()
 
 for (ri in seq_along(mine)) {
   t <- mine[ri]
@@ -59,15 +76,16 @@ for (ri in seq_along(mine)) {
   tt <- proc.time()
   ## Цепь изредка падает (Cholesky в full-conditional) или расходится, давая
   ## взорвавшиеся хвосты предиктивных дисперсий; обе ситуации лечатся
-  ## перезапуском с другим зерном и удлинённым прогревом. Критерий приёмки
-  ## цепи: доля розыгрышей с дневным портфельным СКО выше 50% — не более
-  ## 0,1% (нормальные значения на этих данных на два порядка ниже 50%).
+  ## перезапуском по критерию приёмки (константы выше).
   sd_block <- NULL
-  for (attempt in 0:7) {
-    set.seed(2026 + t + 100000 * attempt)
+  for (attempt in 0:(MAX_ATTEMPTS - 1)) {
+    seed <- 2026 + t + 100000 * attempt
+    burn_a <- BURN + BURN_STEP * attempt
+    set.seed(seed)
+    frac_val <- NA_real_; fail_msg <- ""
     sd_try <- tryCatch({
       fit <- fsvsample(train, factors = K, draws = DRAWS,
-                       burnin = BURN + 500 * attempt,
+                       burnin = burn_a,
                        zeromean = TRUE, quiet = TRUE)
       pc <- predcov(fit, ahead = 1:h)       # N x N x draws x h
       m <- matrix(NA_real_, nrow = h, ncol = DRAWS)
@@ -78,12 +96,25 @@ for (ri in seq_along(mine)) {
         m[j, ] <- apply(pc[, , , j], 3,
                         function(S) sqrt(max(c(w %*% S %*% w), 0))) / 100
       }
-      frac <- mean(m > 0.5)
-      if (!is.finite(frac) || frac > 0.001)
-        stop(sprintf("diverged chain: frac(s > 50%%) = %.4f", frac))
+      frac_val <<- mean(m > SD_BLOWUP)
+      if (!is.finite(frac_val) || frac_val > BLOWUP_SHARE_MAX)
+        stop(sprintf("diverged chain: frac(s > %.0f%%) = %.4f",
+                     100 * SD_BLOWUP, frac_val))
       m
-    }, error = function(e) { cat(sprintf("  retry %d (t=%d): %s\n", attempt + 1, t, conditionMessage(e))); NULL })
-    if (!is.null(sd_try)) { sd_block <- sd_try; break }
+    }, error = function(e) {
+      fail_msg <<- conditionMessage(e)
+      cat(sprintf("  retry %d (t=%d): %s\n", attempt + 1, t, fail_msg))
+      NULL
+    })
+    accepted <- !is.null(sd_try)
+    retry_log[[length(retry_log) + 1]] <- data.frame(
+      chunk = chunk, refit = ri - 1, t = t,
+      refit_date = as.character(df$Datetime[t]),
+      attempt = attempt + 1, seed = seed, burnin = burn_a,
+      outcome = if (accepted) "accepted" else "retry",
+      frac_blowup = frac_val,
+      reason = if (accepted) "" else fail_msg)
+    if (accepted) { sd_block <- sd_try; break }
   }
   if (is.null(sd_block)) stop(sprintf("fsvsample failed after retries at t=%d", t))
   all_dates <- c(all_dates, as.character(df$Datetime[(t + 1):(t + h)]))
@@ -98,4 +129,8 @@ writeBin(as.double(as.vector(all_sd)), paste0(base, ".bin"), size = 8)
 writeLines(all_dates, paste0(base, ".dates"))
 writeLines(c(sprintf("rows %d", nrow(all_sd)), sprintf("cols %d", ncol(all_sd)),
              "layout column-major (R as.vector)"), paste0(base, ".meta"))
-cat(sprintf("chunk %d done: %d prediction days saved\n", chunk, nrow(all_sd)))
+write.csv(do.call(rbind, retry_log),
+          sprintf("output/oos_fmsv_retry_log_chunk%d.csv", chunk),
+          row.names = FALSE)
+cat(sprintf("chunk %d done: %d prediction days saved, %d retry-log rows\n",
+            chunk, nrow(all_sd), length(retry_log)))

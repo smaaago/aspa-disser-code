@@ -323,6 +323,53 @@ pd.DataFrame({
               f"{ri_tvp99.loc['2023-01-01':].mean():.4f}"],
 }).to_csv(TAB / "table31d_ri_breaks.csv", index=False)
 
+# ------------------------------------------------------- датировка (контроль)
+# (а) Устойчивость эндогенных разрывов к монотонной перешкале индекса:
+# та же сегментация на трансформации r/(2−r), спрямляющей сжатие шкалы у
+# единицы. Разрыв, переживающий перешкалу, датирован надёжно; смещающийся
+# на годы — фрагилен и содержательной нагрузки не несёт.
+x_tr = x / (2.0 - x)
+cs = np.concatenate([[0.0], np.cumsum(x_tr)])
+cs2 = np.concatenate([[0.0], np.cumsum(x_tr ** 2)])
+results_tr = {}
+for k in range(MAX_BREAKS + 1):
+    bks, s = segment(k)
+    bic = T_r * np.log(s / T_r) + (2 * k + 1) * np.log(T_r)
+    results_tr[k] = (bks, s, bic)
+k_star_tr = min(results_tr, key=lambda k: results_tr[k][2])
+bdates_tr = [ri_roll.index[b] for b in results_tr[k_star_tr][0]]
+print(f"[Бай-Перрон, r/(2-r)] k* = {k_star_tr}, даты: {[d.date() for d in bdates_tr]}")
+
+# (б) Датировка нарастания без окна: у скользящей меры сдвиг в декабре 2021 г.
+# означает изменения в данных не позднее осени 2021 г. (трейлинговое окно
+# будущего не видит); фильтрационная TVP-траектория проверяет это напрямую.
+tvp = ri_tvp96
+month_means = {m: float(tvp.loc[m].mean())
+               for m in ("2021-10", "2021-11", "2021-12", "2022-01")}
+base_tvp = tvp.loc["2021-01-01":"2021-10-31"]
+thr = base_tvp.mean() + 2 * base_tvp.std()
+ma20 = tvp.rolling(20).mean()
+after = ma20.loc["2021-11-01":]
+above = after > thr
+sustained = above & pd.Series(
+    [above.iloc[i:i + 20].all() for i in range(len(above))], index=above.index)
+cross_date = sustained.idxmax() if sustained.any() else None
+print(f"[TVP-RI] месячные средние: " +
+      ", ".join(f"{m}: {v:.3f}" for m, v in month_means.items()))
+print(f"[TVP-RI] база 01–10.2021 + 2 SD = {thr:.3f}; устойчивое превышение "
+      f"20-дневным средним с {cross_date.date() if cross_date is not None else '—'}")
+
+pd.DataFrame({
+    "item": ["k_star_transformed", "break_dates_transformed",
+             "tvp_mean_2021_10", "tvp_mean_2021_11", "tvp_mean_2021_12",
+             "tvp_mean_2022_01", "tvp_base_plus2sd", "tvp_ma20_cross_date"],
+    "value": [k_star_tr, "; ".join(str(d.date()) for d in bdates_tr),
+              f"{month_means['2021-10']:.4f}", f"{month_means['2021-11']:.4f}",
+              f"{month_means['2021-12']:.4f}", f"{month_means['2022-01']:.4f}",
+              f"{thr:.4f}",
+              str(cross_date.date()) if cross_date is not None else ""],
+}).to_csv(TAB / "table31f_ri_dating.csv", index=False)
+
 # ------------------------------------------------------- рисунок
 fig, axes = plt.subplots(2, 1, figsize=(12.5, 8.2),
                          gridspec_kw={"height_ratios": [1.35, 1]})
